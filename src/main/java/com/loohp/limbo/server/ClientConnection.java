@@ -38,7 +38,7 @@ import java.util.stream.Collectors;
 
 public class ClientConnection extends Thread {
 	
-	public static enum ClientState {
+	public enum ClientState {
 		LEGACY,
 		HANDSHAKE,
 		STATUS,
@@ -54,7 +54,7 @@ public class ClientConnection extends Thread {
     private ClientState state;
     
     private Player player;	
-	private AtomicLong lastKeepAlivePayLoad;
+	private final AtomicLong lastKeepAlivePayLoad;
 	
 	private DataOutputStream output;
 	private DataInputStream input;
@@ -114,20 +114,20 @@ public class ClientConnection extends Thread {
 		try {
 			PacketPlayOutDisconnect packet = new PacketPlayOutDisconnect(ComponentSerializer.toString(reason));
 			sendPacket(packet);
-		} catch (IOException e) {}
+		} catch (IOException ignored) {}
 		try {
 			client_socket.close();
-		} catch (IOException e) {}
+		} catch (IOException ignored) {}
 	}
 	
 	private void disconnectDuringLogin(BaseComponent[] reason) {
 		try {
 			PacketLoginOutDisconnect packet = new PacketLoginOutDisconnect(ComponentSerializer.toString(reason));
 			sendPacket(packet);
-		} catch (IOException e) {}
+		} catch (IOException ignored) {}
 		try {
 			client_socket.close();
-		} catch (IOException e) {}
+		} catch (IOException ignored) {}
 	}
 
 	@SuppressWarnings("deprecation")
@@ -179,23 +179,23 @@ public class ClientConnection extends Thread {
 						DataTypeIO.readVarInt(input);
 						int packetId = DataTypeIO.readVarInt(input);
 						Class<? extends Packet> packetType = Packet.getStatusIn().get(packetId);
-						if (packetType == null) {
-							//do nothing
-						} else if (packetType.equals(PacketStatusInRequest.class)) {
-							String str = inetAddress.getHostName() + ":" + client_socket.getPort();
-							if (Limbo.getInstance().getServerProperties().handshakeVerboseEnabled()) {
-								Limbo.getInstance().getConsole().sendMessage("[/" + str + "] <-> Handshake Status has pinged");
+						if (packetType != null) {
+							if (packetType.equals(PacketStatusInRequest.class)) {
+								String str = inetAddress.getHostName() + ":" + client_socket.getPort();
+								if (Limbo.getInstance().getServerProperties().handshakeVerboseEnabled()) {
+									Limbo.getInstance().getConsole().sendMessage("[/" + str + "] <-> Handshake Status has pinged");
+								}
+								ServerProperties p = Limbo.getInstance().getServerProperties();
+								StatusPingEvent event = new StatusPingEvent(this, p.getVersionString(), p.getProtocol(), ComponentSerializer.parse(p.getMotdJson()), p.getMaxPlayers(), Limbo.getInstance().getPlayers().size(), p.getFavicon().orElse(null));
+								StatusPingEvent.STATUS_PING_EVENT.invoker().onStatusPing(event);
+								PacketStatusOutResponse packet = new PacketStatusOutResponse(Limbo.getInstance().buildServerListResponseJson(event.getVersion(), event.getProtocol(), event.getMotd(), event.getMaxPlayers(), event.getPlayersOnline(), event.getFavicon()));
+								sendPacket(packet);
+							} else if (packetType.equals(PacketStatusInPing.class)) {
+								PacketStatusInPing ping = new PacketStatusInPing(input);
+								PacketStatusOutPong packet = new PacketStatusOutPong(ping.getPayload());
+								sendPacket(packet);
+								break;
 							}
-							ServerProperties p = Limbo.getInstance().getServerProperties();		
-							StatusPingEvent event = new StatusPingEvent(this, p.getVersionString(), p.getProtocol(), ComponentSerializer.parse(p.getMotdJson()), p.getMaxPlayers(), Limbo.getInstance().getPlayers().size(), p.getFavicon().orElse(null));
-							StatusPingEvent.STATUS_PING_EVENT.invoker().onStatusPing(event);
-							PacketStatusOutResponse packet = new PacketStatusOutResponse(Limbo.getInstance().buildServerListResponseJson(event.getVersion(), event.getProtocol(), event.getMotd(), event.getMaxPlayers(), event.getPlayersOnline(), event.getFavicon()));
-							sendPacket(packet);
-						} else if (packetType.equals(PacketStatusInPing.class)) {
-							PacketStatusInPing ping = new PacketStatusInPing(input);
-							PacketStatusOutPong packet = new PacketStatusOutPong(ping.getPayload());
-							sendPacket(packet);
-							break;
 						}
 					}
 					break;
@@ -348,7 +348,7 @@ public class ClientConnection extends Thread {
 				if (player.getGamemode().equals(GameMode.CREATIVE)) {
 					flags.add(PlayerAbilityFlags.CREATIVE);
 				}
-				PacketPlayOutPlayerAbilities abilities = new PacketPlayOutPlayerAbilities(0.05F, 0.1F, flags.toArray(new PlayerAbilityFlags[flags.size()]));
+				PacketPlayOutPlayerAbilities abilities = new PacketPlayOutPlayerAbilities(0.05F, 0.1F, flags.toArray(new PlayerAbilityFlags[0]));
 				sendPacket(abilities);
 				
 				String str = inetAddress.getHostName() + ":" + client_socket.getPort() + "|" + player.getName() + "(" + player.getUniqueId() + ")";
@@ -441,14 +441,10 @@ public class ClientConnection extends Thread {
 							PacketPlayInTabComplete request = new PacketPlayInTabComplete(input);
 							String[] command = CustomStringUtils.splitStringToArgs(request.getText().substring(1));
 
-							List<TabCompleteMatches> matches = new ArrayList<>();
-							
-							matches.addAll(Limbo.getInstance().getPluginManager().getTabOptions(player, command).stream().map(each -> new TabCompleteMatches(each)).collect(Collectors.toList()));
-							
 							int start = CustomStringUtils.getIndexOfArg(request.getText(), command.length - 1) + 1;
 							int length = command[command.length - 1].length();
 							
-							PacketPlayOutTabComplete response = new PacketPlayOutTabComplete(request.getId(), start, length, matches.toArray(new TabCompleteMatches[matches.size()]));
+							PacketPlayOutTabComplete response = new PacketPlayOutTabComplete(request.getId(), start, length, Limbo.getInstance().getPluginManager().getTabOptions(player, command).stream().map(TabCompleteMatches::new).toArray(TabCompleteMatches[]::new));
 							sendPacket(response);
 						} else if (packetType.equals(PacketPlayInChat.class)) {
 							PacketPlayInChat chat = new PacketPlayInChat(input);
