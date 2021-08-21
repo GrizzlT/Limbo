@@ -242,13 +242,15 @@ public class Player extends LivingEntity implements CommandSender {
 	}
 	
 	public void chat(String message) {
-		String format = "<%name%> %message%";
-		PlayerChatEvent event = new PlayerChatEvent(this, format, message);
-		if (!PlayerChatEvent.PLAYER_CHAT_EVENT.invoker().onPlayerChat(event) && (Limbo.getInstance().getServerProperties().isAllowChat() || this.hasPermission("limboserver.chat"))) {
-			String chat = event.getFormat().replace("%name%", username).replace("%message%", event.getMessage());
-			Limbo.getInstance().getConsole().sendMessage(chat);
-			for (Player each : Limbo.getInstance().getPlayers()) {
-				each.sendMessage(chat, uuid);
+		if (Limbo.getInstance().getServerProperties().isAllowChat()) {
+			String format = "<%name%> %message%";
+			PlayerChatEvent event = new PlayerChatEvent(this, format, message);
+			if (!PlayerChatEvent.PLAYER_CHAT_EVENT.invoker().onPlayerChat(event) && this.hasPermission("limboserver.chat")) {
+				String chat = event.getFormat().replace("%name%", username).replace("%message%", event.getMessage());
+				Limbo.getInstance().getConsole().sendMessage(chat);
+				for (Player each : Limbo.getInstance().getPlayers()) {
+					each.sendMessage(chat, uuid);
+				}
 			}
 		}
 	}
