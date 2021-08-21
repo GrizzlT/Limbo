@@ -1,48 +1,7 @@
 package com.loohp.limbo;
 
-import java.awt.GraphicsEnvironment;
-import java.awt.image.BufferedImage;
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
-import java.net.URL;
-import java.nio.channels.Channels;
-import java.nio.channels.ReadableByteChannel;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Enumeration;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Set;
-import java.util.TreeMap;
-import java.util.UUID;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
-
-import org.json.simple.JSONArray;
-import org.json.simple.JSONObject;
-import org.json.simple.parser.JSONParser;
-import org.json.simple.parser.ParseException;
-
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
-import com.loohp.limbo.server.ServerConnection;
-import com.loohp.limbo.server.packets.Packet;
-import com.loohp.limbo.server.packets.PacketIn;
-import com.loohp.limbo.server.packets.PacketOut;
 import com.loohp.limbo.commands.CommandSender;
 import com.loohp.limbo.consolegui.GUI;
 import com.loohp.limbo.file.ServerProperties;
@@ -54,6 +13,10 @@ import com.loohp.limbo.plugins.LimboPlugin;
 import com.loohp.limbo.plugins.PluginManager;
 import com.loohp.limbo.scheduler.LimboScheduler;
 import com.loohp.limbo.scheduler.Tick;
+import com.loohp.limbo.server.ServerConnection;
+import com.loohp.limbo.server.packets.Packet;
+import com.loohp.limbo.server.packets.PacketIn;
+import com.loohp.limbo.server.packets.PacketOut;
 import com.loohp.limbo.utils.CustomStringUtils;
 import com.loohp.limbo.utils.ImageUtils;
 import com.loohp.limbo.utils.NetworkUtils;
@@ -61,11 +24,29 @@ import com.loohp.limbo.world.DimensionRegistry;
 import com.loohp.limbo.world.Environment;
 import com.loohp.limbo.world.Schematic;
 import com.loohp.limbo.world.World;
-
 import net.md_5.bungee.api.chat.BaseComponent;
 import net.md_5.bungee.chat.ComponentSerializer;
 import net.querz.nbt.io.NBTUtil;
 import net.querz.nbt.tag.CompoundTag;
+import org.json.simple.JSONArray;
+import org.json.simple.JSONObject;
+import org.json.simple.parser.JSONParser;
+import org.json.simple.parser.ParseException;
+
+import java.awt.*;
+import java.awt.image.BufferedImage;
+import java.io.*;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.List;
+import java.util.*;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 public class Limbo {
 	
@@ -292,11 +273,12 @@ public class Limbo {
         
         File defaultCommandsJar = new File(pluginFolder, "LimboDefaultCmd.jar");
         defaultCommandsJar.delete();
-        console.sendMessage("Downloading limbo default commands module from github...");
-        ReadableByteChannel rbc = Channels.newChannel(new URL("https://github.com/LOOHP/Limbo/raw/master/modules/LimboDefaultCmd.jar").openStream());
-	    FileOutputStream fos = new FileOutputStream(defaultCommandsJar);
-	    fos.getChannel().transferFrom(rbc, 0, Long.MAX_VALUE);
-	    fos.close();
+        console.sendMessage("Loading limbo default commands module...");
+        try (InputStream in = Limbo.class.getClassLoader().getResourceAsStream("LimboDefaultCmd.jar")) {
+        	Files.copy(in, defaultCommandsJar.toPath());
+        } catch (IOException e) {
+        	e.printStackTrace();
+        }
 		
 	    pluginManager = new PluginManager(pluginFolder);
 	    try {
@@ -364,16 +346,25 @@ public class Limbo {
 		
 		if (!schem.exists()) {
 			console.sendMessage("Schemetic file " + properties.getSchemFileName() + " for world " + properties.getLevelName() + " not found!");
+			console.sendMessage("Creating default world...");
+	        try (InputStream in = Limbo.class.getClassLoader().getResourceAsStream("spawn.schem")) {
+	        	Files.copy(in, schem.toPath());
+	        } catch (IOException e) {
+	        	e.printStackTrace();
+	        }
+		}
+		
+		try {
+			World world = Schematic.toWorld(properties.getLevelName().getKey(), Environment.fromNamespacedKey(properties.getLevelDimension()), (CompoundTag) NBTUtil.read(schem).getTag());		
+			console.sendMessage("Loaded world " + properties.getLevelName() + "!");		
+			return world;
+		} catch (Throwable e) {
+			console.sendMessage("Unable to load world " + properties.getSchemFileName() + "!");
+			e.printStackTrace();
 			console.sendMessage("Server will exit!");
 			System.exit(1);
 			return null;
 		}
-		
-		World world = Schematic.toWorld(properties.getLevelName().getKey(), Environment.fromNamespacedKey(properties.getLevelDimension()), (CompoundTag) NBTUtil.read(schem).getTag());
-		
-		console.sendMessage("Loaded world " + properties.getLevelName() + "!");
-		
-		return world;		
 	}
 	
 	public void registerWorld(World world) {

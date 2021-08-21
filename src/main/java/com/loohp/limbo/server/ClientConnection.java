@@ -21,6 +21,9 @@ import net.md_5.bungee.api.ChatColor;
 import net.md_5.bungee.api.chat.BaseComponent;
 import net.md_5.bungee.api.chat.TextComponent;
 import net.md_5.bungee.chat.ComponentSerializer;
+import org.json.simple.JSONArray;
+import org.json.simple.JSONObject;
+import org.json.simple.parser.JSONParser;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -43,6 +46,8 @@ public class ClientConnection extends Thread {
 		PLAY,
 		DISCONNECTED;
 	}
+
+	private final Random random = new Random();
 
     private final Socket client_socket;
     private boolean running;
@@ -159,10 +164,12 @@ public class ClientConnection extends Thread {
 		    
 		    PacketHandshakingIn handshake = new PacketHandshakingIn(input);
 		    
-		    boolean isBungeecord = Limbo.getInstance().getServerProperties().isBungeecord();		    
+		    boolean isBungeecord = Limbo.getInstance().getServerProperties().isBungeecord();
+		    boolean isBungeeGuard = Limbo.getInstance().getServerProperties().isBungeeGuard();
+		    boolean isVelocityModern = Limbo.getInstance().getServerProperties().isVelocityModern();
 		    String bungeeForwarding = handshake.getServerAddress();
 		    UUID bungeeUUID = null;
-		    SkinResponse bungeeSkin = null;
+		    SkinResponse forwardedSkin = null;
 		    
 		    try {
 			    switch (handshake.getHandshakeType()) {
@@ -195,7 +202,7 @@ public class ClientConnection extends Thread {
 				case LOGIN:
 					state = ClientState.LOGIN;
 					
-					if (isBungeecord) {
+					if (isBungeecord || isBungeeGuard) {
 						try {
 					    	String[] data = bungeeForwarding.split("\\x00");
 					    	//String host = data[0];
@@ -203,20 +210,35 @@ public class ClientConnection extends Thread {
 					    	
 					    	bungeeUUID = UUID.fromString(data[2].replaceFirst("([0-9a-fA-F]{8})([0-9a-fA-F]{4})([0-9a-fA-F]{4})([0-9a-fA-F]{4})([0-9a-fA-F]+)", "$1-$2-$3-$4-$5"));
 					    	inetAddress = InetAddress.getByName(ip);
-					    	
+
+							boolean bungeeGuardFound = false;
 					    	if (data.length > 3) {
-						    	String skinJson = data[3];
-						    	
-						    	String skin = skinJson.split("\"value\":\"")[1].split("\"")[0];
-					            String signature = skinJson.split("\"signature\":\"")[1].split("\"")[0];
-						    	bungeeSkin = new SkinResponse(skin, signature);
+						    	JSONArray skinJson = (JSONArray) new JSONParser().parse(data[3]);
+
+						    	for (Object obj : skinJson) {
+						    		JSONObject property = (JSONObject) obj;
+						    		if (property.get("name").toString().equals("textures")) {
+						    			String skin = property.get("value").toString();
+						    			String signature = property.get("signature").toString();
+						    			forwardedSkin = new SkinResponse(skin, signature);
+									} else if (isBungeeGuard && property.get("name").toString().equals("bungeeguard-token")) {
+						    			String token = property.get("value").toString();
+						    			bungeeGuardFound = Limbo.getInstance().getServerProperties().getForwardingSecrets().contains(token);
+									}
+								}
 					    	}
+
+					    	if (isBungeeGuard && !bungeeGuardFound) {
+					    		disconnectDuringLogin(TextComponent.fromLegacyText("Invalid information forwarding"));
+					    		break;
+							}
 						} catch (Exception e) {
 							Limbo.getInstance().getConsole().sendMessage("If you wish to use bungeecord's IP forwarding, please enable that in your bungeecord config.yml as well!");
 							disconnectDuringLogin(new BaseComponent[] {new TextComponent(ChatColor.RED + "Please connect from the proxy!")});
 						}
 				    }
-					
+
+					int messageId = this.random.nextInt();
 					while (client_socket.isConnected()) {
 						int size = DataTypeIO.readVarInt(input);
 						int packetId = DataTypeIO.readVarInt(input);
@@ -227,7 +249,14 @@ public class ClientConnection extends Thread {
 						} else if (packetType.equals(PacketLoginInLoginStart.class)) {
 							PacketLoginInLoginStart start = new PacketLoginInLoginStart(input);
 							String username = start.getUsername();
-							UUID uuid = isBungeecord ? bungeeUUID : UUID.nameUUIDFromBytes(("OfflinePlayer:" + username).getBytes(StandardCharsets.UTF_8));
+
+							if (Limbo.getInstance().getServerProperties().isVelocityModern()) {
+								PacketLoginOutPluginMessaging loginPluginRequest = new PacketLoginOutPluginMessaging(messageId, ForwardingUtils.VELOCITY_FORWARDING_CHANNEL);
+								sendPacket(loginPluginRequest);
+								continue;
+							}
+
+							UUID uuid = isBungeecord || isBungeeGuard ? bungeeUUID : UUID.nameUUIDFromBytes(("OfflinePlayer:" + username).getBytes(StandardCharsets.UTF_8));
 
 							PlayerLoginEvent event = new PlayerLoginEvent(this);
 							if (PlayerLoginEvent.PLAYER_LOGIN_EVENT.invoker().onPlayerLoginEvent(event)) {
@@ -245,6 +274,41 @@ public class ClientConnection extends Thread {
 							Limbo.getInstance().addPlayer(player);
 							
 							break;
+						} else if (packetType.equals(PacketLoginInPluginMessaging.class)) {
+							PacketLoginInPluginMessaging response = new PacketLoginInPluginMessaging(input, size, packetId);
+							if (response.getMessageId() != messageId) {
+								disconnectDuringLogin(TextComponent.fromLegacyText("Internal error, messageId did not match"));
+								break;
+							}
+							if (!response.getData().isPresent()) {
+								disconnectDuringLogin(TextComponent.fromLegacyText("Unknown login plugin response packet!"));
+								break;
+							}
+							byte[] responseData = response.getData().get();
+							if (!ForwardingUtils.validateVelocityModernResponse(responseData)) {
+								disconnectDuringLogin(TextComponent.fromLegacyText("Invalid playerinfo forwarding!"));
+								break;
+							}
+							ForwardingUtils.VelocityModernForwardingData data = ForwardingUtils.getVelocityDataFrom(responseData);
+							inetAddress = InetAddress.getByName(data.getIpAddress());
+							forwardedSkin = data.getSkinResponse();
+
+							PlayerLoginEvent event = new PlayerLoginEvent(this);
+							if (PlayerLoginEvent.PLAYER_LOGIN_EVENT.invoker().onPlayerLoginEvent(event)) {
+								disconnectDuringLogin(event.getCancelReason());
+								break;
+							}
+
+							PacketLoginOutLoginSuccess success = new PacketLoginOutLoginSuccess(data.getUuid(), data.getUsername());
+							sendPacket(success);
+
+							state = ClientState.PLAY;
+
+							player = new Player(this, data.getUsername(), data.getUuid(), Limbo.getInstance().getNextEntityId(), Limbo.getInstance().getServerProperties().getWorldSpawn(), new PlayerInteractManager());
+							player.setSkinLayers((byte) (0x01 | 0x02 | 0x04 | 0x08 | 0x10 | 0x20 | 0x40));
+							Limbo.getInstance().addPlayer(player);
+
+							break;
 						} else {
 							input.skipBytes(size - DataTypeIO.getVarIntLength(packetId));
 						}
@@ -253,6 +317,7 @@ public class ClientConnection extends Thread {
 					break;
 			    }
 		    } catch (Exception e) {
+		    	e.printStackTrace();
 		    	client_socket.close();
 				state = ClientState.DISCONNECTED;
 		    }
@@ -271,7 +336,7 @@ public class ClientConnection extends Thread {
     			sendPacket(join);
     			Limbo.getInstance().getUnsafe().setPlayerGameModeSilently(player, properties.getDefaultGamemode());
     			
-				SkinResponse skinresponce = isBungeecord && bungeeSkin != null ? bungeeSkin : MojangAPIUtils.getSkinFromMojangServer(player.getName());
+				SkinResponse skinresponce = (isVelocityModern || isBungeeGuard || isBungeecord) && forwardedSkin != null ? forwardedSkin : MojangAPIUtils.getSkinFromMojangServer(player.getName());
 				PlayerSkinProperty skin = skinresponce != null ? new PlayerSkinProperty(skinresponce.getSkin(), skinresponce.getSignature()) : null;
 				PacketPlayOutPlayerInfo info = new PacketPlayOutPlayerInfo(PlayerInfoAction.ADD_PLAYER, player.getUniqueId(), new PlayerInfoData.PlayerInfoDataAddPlayer(player.getName(), Optional.ofNullable(skin), properties.getDefaultGamemode(), 0, false, Optional.empty()));
 				sendPacket(info);			
@@ -286,7 +351,7 @@ public class ClientConnection extends Thread {
 				PacketPlayOutPlayerAbilities abilities = new PacketPlayOutPlayerAbilities(0.05F, 0.1F, flags.toArray(new PlayerAbilityFlags[flags.size()]));
 				sendPacket(abilities);
 				
-				String str = inetAddress.getHostName() + ":" + client_socket.getPort() + "|" + player.getName();
+				String str = inetAddress.getHostName() + ":" + client_socket.getPort() + "|" + player.getName() + "(" + player.getUniqueId() + ")";
 				Limbo.getInstance().getConsole().sendMessage("[/" + str + "] <-> Player had connected to the Limbo server!");
 				
 				PacketPlayOutDeclareCommands declare = DeclareCommands.getDeclareCommandsPacket(player);
@@ -320,8 +385,7 @@ public class ClientConnection extends Thread {
 						int packetId = DataTypeIO.readVarInt(input);
 						Class<? extends Packet> packetType = Packet.getPlayIn().get(packetId);
 						//Limbo.getInstance().getConsole().sendMessage(packetId + " -> " + packetType);
-						CheckedConsumer<PlayerMoveEvent, IOException> processMoveEvent = event -> {
-							Location originalTo = event.getTo().clone();
+						CheckedBiConsumer<PlayerMoveEvent, Location, IOException> processMoveEvent = (event, originalTo) -> {
 							if (PlayerMoveEvent.PLAYER_MOVE_EVENT.invoker().onPlayerMove(event)) {
 								Location returnTo = event.getFrom();
 								PacketPlayOutPositionAndLook cancel = new PacketPlayOutPositionAndLook(returnTo.getX(), returnTo.getY(), returnTo.getZ(), returnTo.getYaw(), returnTo.getPitch(), 1, false);
@@ -345,22 +409,28 @@ public class ClientConnection extends Thread {
 							Location from = player.getLocation();
 							Location to = new Location(player.getWorld(), pos.getX(), pos.getY(), pos.getZ(), pos.getYaw(), pos.getPitch());
 
-							PlayerMoveEvent event = new PlayerMoveEvent(player, from, to);
-							processMoveEvent.consume(event);
+							if (!from.equals(to)) {
+								PlayerMoveEvent event = new PlayerMoveEvent(player, from, to);
+								processMoveEvent.consume(event, to);
+							}
 						} else if (packetType.equals(PacketPlayInPosition.class)) {
 							PacketPlayInPosition pos = new PacketPlayInPosition(input);
 							Location from = player.getLocation();
 							Location to = new Location(player.getWorld(), pos.getX(), pos.getY(), pos.getZ(), player.getLocation().getYaw(), player.getLocation().getPitch());
 
-							PlayerMoveEvent event = new PlayerMoveEvent(player, from, to);
-							processMoveEvent.consume(event);
+							if (!from.equals(to)) {
+								PlayerMoveEvent event = new PlayerMoveEvent(player, from, to);
+								processMoveEvent.consume(event, to);
+							}
 						} else if (packetType.equals(PacketPlayInRotation.class)) {
 							PacketPlayInRotation pos = new PacketPlayInRotation(input);
 							Location from = player.getLocation();
 							Location to = new Location(player.getWorld(), player.getLocation().getX(), player.getLocation().getY(), player.getLocation().getZ(), pos.getYaw(), pos.getPitch());
 
-							PlayerMoveEvent event = new PlayerMoveEvent(player, from, to);
-							processMoveEvent.consume(event);
+							if (!from.equals(to)) {
+								PlayerMoveEvent event = new PlayerMoveEvent(player, from, to);
+								processMoveEvent.consume(event, to);
+							}
 						} else if (packetType.equals(PacketPlayInKeepAlive.class)) {
 							PacketPlayInKeepAlive alive = new PacketPlayInKeepAlive(input);
 							if (alive.getPayload() != getLastKeepAlivePayLoad()) {
@@ -371,7 +441,7 @@ public class ClientConnection extends Thread {
 							PacketPlayInTabComplete request = new PacketPlayInTabComplete(input);
 							String[] command = CustomStringUtils.splitStringToArgs(request.getText().substring(1));
 
-							List<TabCompleteMatches> matches = new ArrayList<TabCompleteMatches>();
+							List<TabCompleteMatches> matches = new ArrayList<>();
 							
 							matches.addAll(Limbo.getInstance().getPluginManager().getTabOptions(player, command).stream().map(each -> new TabCompleteMatches(each)).collect(Collectors.toList()));
 							
@@ -416,11 +486,11 @@ public class ClientConnection extends Thread {
 
 	    	}
 
-    	} catch (Exception e) {}
+    	} catch (Exception ignored) {}
 
     	try {
 			client_socket.close();
-		} catch (IOException e) {}
+		} catch (IOException ignored) {}
     	state = ClientState.DISCONNECTED;
 
     	if (player != null) {
@@ -429,9 +499,5 @@ public class ClientConnection extends Thread {
     	Limbo.getInstance().getServerConnection().getClients().remove(this);
 		running = false;
 	}
-
-	@FunctionalInterface
-	public interface CheckedConsumer<T, TException extends Throwable> {
-		void consume(T t) throws TException;
-	}
+	
 }

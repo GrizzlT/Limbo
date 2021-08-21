@@ -14,6 +14,10 @@ public class PacketLoginOutPluginMessaging extends PacketOut {
 	private NamespacedKey channel;
 	private byte[] data;
 
+	public PacketLoginOutPluginMessaging(int messageId, NamespacedKey channel) {
+		this(messageId, channel, null);
+	}
+
 	public PacketLoginOutPluginMessaging(int messageId, NamespacedKey channel, byte[] data) {
 		this.messageId = messageId;
 		this.channel = channel;
@@ -40,7 +44,9 @@ public class PacketLoginOutPluginMessaging extends PacketOut {
 		output.writeByte(Packet.getLoginOut().get(getClass()));
 		DataTypeIO.writeVarInt(output, messageId);
 		DataTypeIO.writeString(output, channel.toString(), StandardCharsets.UTF_8);
-		output.write(data);
+		if (data != null) {
+			output.write(data);
+		}
 		
 		return buffer.toByteArray();
 	}
